@@ -41,7 +41,7 @@ app.post("/api/projects", async (req, res, next) => {
   try {
     const name = cleanName(req.body?.name || "GD&T Project");
     const now = new Date().toISOString();
-    const id = nanoid(10);
+    const id = makeDatasetId(name);
     const project = {
       id,
       name,
@@ -51,7 +51,8 @@ app.post("/api/projects", async (req, res, next) => {
     };
     await ensureProjectDirs(id);
     await saveProject(project);
-    res.status(201).json({ project });
+    const exportResult = await writeStableExport(project, 0.1);
+    res.status(201).json({ project, exportResult });
   } catch (error) {
     next(error);
   }
@@ -69,6 +70,7 @@ app.put("/api/projects/:id", async (req, res, next) => {
   try {
     const existing = await readProject(req.params.id);
     const incoming = req.body?.project;
+    const valRatio = clampNumber(Number(req.body?.valRatio ?? 0.1), 0, 0.5);
     if (!incoming || incoming.id !== existing.id) {
       return res.status(400).json({ error: "Invalid project payload." });
     }
@@ -78,8 +80,40 @@ app.put("/api/projects/:id", async (req, res, next) => {
       updatedAt: new Date().toISOString()
     };
     await saveProject(project);
-    res.json({ project });
+    const exportResult = await writeStableExport(project, valRatio);
+    res.json({ project, exportResult });
   } catch (error) {
+    next(error);
+  }
+});
+
+app.post("/api/import", upload.single("file"), async (req, res, next) => {
+  try {
+    if (!req.file) {
+      return res.status(400).json({ error: "No file uploaded." });
+    }
+
+    const originalName = req.file.originalname || "input";
+    const now = new Date().toISOString();
+    const project = {
+      id: makeDatasetId(originalName),
+      name: cleanName(path.parse(originalName).name || "GD&T Dataset"),
+      createdAt: now,
+      updatedAt: now,
+      pages: []
+    };
+    await ensureProjectDirs(project.id);
+    const pages = await importPages(project, req.file.path, originalName, req.body?.dpi);
+    project.pages.push(...pages);
+    project.updatedAt = new Date().toISOString();
+    await saveProject(project);
+    const exportResult = await writeStableExport(project, 0.1);
+    await fs.rm(req.file.path, { force: true });
+    res.status(201).json({ project, pages, exportResult });
+  } catch (error) {
+    if (req.file?.path) {
+      await fs.rm(req.file.path, { force: true }).catch(() => {});
+    }
     next(error);
   }
 });
@@ -92,56 +126,13 @@ app.post("/api/projects/:id/import", upload.single("file"), async (req, res, nex
     }
 
     const originalName = req.file.originalname || "input";
-    const ext = path.extname(originalName).toLowerCase();
-    const dpi = clampNumber(Number(req.body?.dpi || 300), 100, 600);
-    const pagesDir = projectPagesDir(project.id);
-    await ensureDirs([pagesDir]);
-
-    let pages = [];
-    if (ext === ".pdf") {
-      const prefix = `${Date.now()}_${slugBase(originalName)}_p`;
-      const worker = await runCommand("uv", [
-        "run",
-        "--project",
-        ROOT,
-        "python",
-        "scripts/pdf_to_images.py",
-        "--input",
-        req.file.path,
-        "--output",
-        pagesDir,
-        "--prefix",
-        prefix,
-        "--dpi",
-        String(dpi)
-      ]);
-      const manifest = JSON.parse(worker.stdout);
-      pages = manifest.pages.map((page) => toProjectPage(project.id, page, originalName, dpi));
-    } else if ([".png", ".jpg", ".jpeg"].includes(ext)) {
-      const safeName = `${Date.now()}_${slugBase(originalName)}${ext}`;
-      const target = path.join(pagesDir, safeName);
-      await fs.copyFile(req.file.path, target);
-      const size = imageSize(await fs.readFile(target));
-      pages = [
-        {
-          id: nanoid(10),
-          sourceName: originalName,
-          imagePath: toDataPath(target),
-          width: Number(size.width),
-          height: Number(size.height),
-          dpi: null,
-          annotations: []
-        }
-      ];
-    } else {
-      return res.status(400).json({ error: "Supported files: PDF, PNG, JPG." });
-    }
-
+    const pages = await importPages(project, req.file.path, originalName, req.body?.dpi);
     await fs.rm(req.file.path, { force: true });
     project.pages.push(...pages);
     project.updatedAt = new Date().toISOString();
     await saveProject(project);
-    res.status(201).json({ project, pages });
+    const exportResult = await writeStableExport(project, 0.1);
+    res.status(201).json({ project, pages, exportResult });
   } catch (error) {
     if (req.file?.path) {
       await fs.rm(req.file.path, { force: true }).catch(() => {});
@@ -154,54 +145,9 @@ app.post("/api/projects/:id/export", async (req, res, next) => {
   try {
     const project = await readProject(req.params.id);
     const valRatio = clampNumber(Number(req.body?.valRatio ?? 0.1), 0, 0.5);
-    const timestamp = new Date().toISOString().replace(/[:.]/g, "-");
-    const exportDir = path.join(EXPORTS_DIR, `${project.id}_${timestamp}`);
-    const exportImagesDir = path.join(exportDir, "images");
-    await ensureDirs([exportImagesDir]);
-
-    const pageEntries = [];
-    for (let index = 0; index < project.pages.length; index += 1) {
-      const page = project.pages[index];
-      const source = path.join(DATA_ROOT, fromDataPath(page.imagePath));
-      const ext = path.extname(source) || ".png";
-      const imageName = `${String(index + 1).padStart(4, "0")}_${slugBase(page.sourceName || page.id)}${ext}`;
-      const target = path.join(exportImagesDir, imageName);
-      await fs.copyFile(source, target);
-      pageEntries.push({
-        image: `images/${imageName}`,
-        label: formatPaddleAnnotations(page.annotations || [])
-      });
-    }
-
-    const valCount = computeValCount(pageEntries.length, valRatio);
-    const trainEntries = pageEntries.slice(0, pageEntries.length - valCount);
-    const valEntries = pageEntries.slice(pageEntries.length - valCount);
-    await fs.writeFile(path.join(exportDir, "train.txt"), toLabelFile(trainEntries), "utf8");
-    await fs.writeFile(path.join(exportDir, "val.txt"), toLabelFile(valEntries), "utf8");
-    await fs.writeFile(
-      path.join(exportDir, "manifest.json"),
-      JSON.stringify(
-        {
-          projectId: project.id,
-          projectName: project.name,
-          exportedAt: new Date().toISOString(),
-          totalPages: pageEntries.length,
-          trainPages: trainEntries.length,
-          valPages: valEntries.length
-        },
-        null,
-        2
-      ),
-      "utf8"
-    );
-
-    res.json({
-      exportDir,
-      trainFile: path.join(exportDir, "train.txt"),
-      valFile: path.join(exportDir, "val.txt"),
-      trainPages: trainEntries.length,
-      valPages: valEntries.length
-    });
+    const updatedProject = { ...project, updatedAt: new Date().toISOString() };
+    await saveProject(updatedProject);
+    res.json(await writeStableExport(updatedProject, valRatio));
   } catch (error) {
     next(error);
   }
@@ -217,28 +163,40 @@ app.listen(PORT, "127.0.0.1", () => {
 });
 
 async function listProjects() {
-  await ensureDirs([PROJECTS_DIR]);
-  const dirs = await fs.readdir(PROJECTS_DIR, { withFileTypes: true });
+  await ensureDirs([EXPORTS_DIR]);
+  const dirs = await fs.readdir(EXPORTS_DIR, { withFileTypes: true });
   const projects = [];
   for (const dir of dirs) {
     if (!dir.isDirectory()) continue;
     try {
-      const project = await readProject(dir.name);
+      const file = path.join(EXPORTS_DIR, dir.name, "project.json");
+      const project = JSON.parse(await fs.readFile(file, "utf8"));
       projects.push({
         id: project.id,
         name: project.name,
         updatedAt: project.updatedAt,
-        pageCount: project.pages.length
+        pageCount: project.pages.length,
+        exportDir: path.join(EXPORTS_DIR, dir.name)
       });
     } catch {
-      // Ignore incomplete project directories.
+      // Ignore older timestamped exports or incomplete directories without project.json.
     }
+  }
+  if (projects.length === 0) {
+    return listProjectCache();
   }
   return projects.sort((a, b) => String(b.updatedAt).localeCompare(String(a.updatedAt)));
 }
 
 async function readProject(id) {
   assertSafeId(id);
+  const exportFile = path.join(EXPORTS_DIR, id, "project.json");
+  try {
+    const raw = await fs.readFile(exportFile, "utf8");
+    return JSON.parse(raw);
+  } catch {
+    // Fall back to the editing cache for pre-export or legacy projects.
+  }
   const file = projectFile(id);
   const raw = await fs.readFile(file, "utf8");
   return JSON.parse(raw);
@@ -266,6 +224,154 @@ async function ensureDirs(dirs) {
   for (const dir of dirs) {
     await fs.mkdir(dir, { recursive: true });
   }
+}
+
+async function importPages(project, uploadedPath, originalName, rawDpi) {
+  const ext = path.extname(originalName).toLowerCase();
+  const dpi = clampNumber(Number(rawDpi || 300), 100, 600);
+  const pagesDir = projectPagesDir(project.id);
+  await ensureDirs([pagesDir]);
+
+  if (ext === ".pdf") {
+    const prefix = `${Date.now()}_${slugBase(originalName)}_p`;
+    const worker = await runCommand("uv", [
+      "run",
+      "--project",
+      ROOT,
+      "python",
+      "scripts/pdf_to_images.py",
+      "--input",
+      uploadedPath,
+      "--output",
+      pagesDir,
+      "--prefix",
+      prefix,
+      "--dpi",
+      String(dpi)
+    ]);
+    const manifest = JSON.parse(worker.stdout);
+    return manifest.pages.map((page) => toProjectPage(project.id, page, originalName, dpi));
+  }
+
+  if ([".png", ".jpg", ".jpeg"].includes(ext)) {
+    const safeName = `${Date.now()}_${slugBase(originalName)}${ext}`;
+    const target = path.join(pagesDir, safeName);
+    await fs.copyFile(uploadedPath, target);
+    const size = imageSize(await fs.readFile(target));
+    return [
+      {
+        id: nanoid(10),
+        sourceName: originalName,
+        imagePath: toDataPath(target),
+        width: Number(size.width),
+        height: Number(size.height),
+        dpi: null,
+        annotations: []
+      }
+    ];
+  }
+
+  throw new Error("Supported files: PDF, PNG, JPG.");
+}
+
+async function listProjectCache() {
+  await ensureDirs([PROJECTS_DIR]);
+  const dirs = await fs.readdir(PROJECTS_DIR, { withFileTypes: true });
+  const projects = [];
+  for (const dir of dirs) {
+    if (!dir.isDirectory()) continue;
+    try {
+      const raw = await fs.readFile(projectFile(dir.name), "utf8");
+      const project = JSON.parse(raw);
+      projects.push({
+        id: project.id,
+        name: project.name,
+        updatedAt: project.updatedAt,
+        pageCount: project.pages.length,
+        exportDir: null
+      });
+    } catch {
+      // Ignore incomplete project cache directories.
+    }
+  }
+  return projects.sort((a, b) => String(b.updatedAt).localeCompare(String(a.updatedAt)));
+}
+
+async function writeStableExport(project, valRatio) {
+  assertSafeId(project.id);
+  const finalDir = path.join(EXPORTS_DIR, project.id);
+  const tempDir = path.join(EXPORTS_DIR, `.${project.id}_${Date.now()}_${nanoid(4)}`);
+  const tempImagesDir = path.join(tempDir, "images");
+  const finalImagesDir = path.join(finalDir, "images");
+  assertInside(EXPORTS_DIR, tempDir);
+  assertInside(EXPORTS_DIR, finalDir);
+  await ensureDirs([tempImagesDir]);
+
+  const pageEntries = [];
+  const exportedPages = [];
+  for (let index = 0; index < project.pages.length; index += 1) {
+    const page = project.pages[index];
+    const source = path.join(DATA_ROOT, fromDataPath(page.imagePath));
+    const ext = path.extname(source) || ".png";
+    const imageName = `${String(index + 1).padStart(4, "0")}_${slugBase(page.sourceName || page.id)}${ext}`;
+    const tempTarget = path.join(tempImagesDir, imageName);
+    const finalImagePath = path.join(finalImagesDir, imageName);
+    await fs.copyFile(source, tempTarget);
+    pageEntries.push({
+      image: `images/${imageName}`,
+      label: formatPaddleAnnotations(page.annotations || [])
+    });
+    exportedPages.push({
+      ...page,
+      imagePath: toDataPath(finalImagePath)
+    });
+  }
+
+  const valCount = computeValCount(pageEntries.length, valRatio);
+  const trainEntries = pageEntries.slice(0, pageEntries.length - valCount);
+  const valEntries = pageEntries.slice(pageEntries.length - valCount);
+  const exportedProject = {
+    ...project,
+    updatedAt: new Date().toISOString(),
+    pages: exportedPages
+  };
+
+  await fs.writeFile(path.join(tempDir, "train.txt"), toLabelFile(trainEntries), "utf8");
+  await fs.writeFile(path.join(tempDir, "val.txt"), toLabelFile(valEntries), "utf8");
+  await fs.writeFile(path.join(tempDir, "project.json"), JSON.stringify(exportedProject, null, 2), "utf8");
+  await fs.writeFile(
+    path.join(tempDir, "manifest.json"),
+    JSON.stringify(
+      {
+        projectId: project.id,
+        projectName: project.name,
+        exportedAt: exportedProject.updatedAt,
+        totalPages: pageEntries.length,
+        trainPages: trainEntries.length,
+        valPages: valEntries.length
+      },
+      null,
+      2
+    ),
+    "utf8"
+  );
+
+  await replaceDirectory(tempDir, finalDir);
+
+  return {
+    exportDir: finalDir,
+    trainFile: path.join(finalDir, "train.txt"),
+    valFile: path.join(finalDir, "val.txt"),
+    trainPages: trainEntries.length,
+    valPages: valEntries.length
+  };
+}
+
+async function replaceDirectory(sourceDir, targetDir) {
+  assertInside(EXPORTS_DIR, sourceDir);
+  assertInside(EXPORTS_DIR, targetDir);
+  await fs.rm(targetDir, { recursive: true, force: true });
+  await fs.rename(sourceDir, targetDir);
 }
 
 function toProjectPage(projectId, page, sourceName, dpi) {
@@ -315,6 +421,11 @@ function cleanName(value) {
   return String(value).trim().replace(/\s+/g, " ").slice(0, 80) || "GD&T Project";
 }
 
+function makeDatasetId(value) {
+  const base = slugBase(value).replace(/[^a-zA-Z0-9_-]+/g, "_").replace(/^_+|_+$/g, "") || "dataset";
+  return `${base}_${nanoid(6)}`;
+}
+
 function slugBase(value) {
   const parsed = path.parse(value);
   return (parsed.name || "file")
@@ -332,6 +443,14 @@ function clampNumber(value, min, max) {
 function assertSafeId(id) {
   if (!/^[a-zA-Z0-9_-]+$/.test(String(id))) {
     throw new Error("Invalid project id.");
+  }
+}
+
+function assertInside(parent, target) {
+  const resolvedParent = path.resolve(parent);
+  const resolvedTarget = path.resolve(target);
+  if (!resolvedTarget.startsWith(`${resolvedParent}${path.sep}`)) {
+    throw new Error(`Unexpected path outside ${resolvedParent}`);
   }
 }
 

@@ -2,7 +2,7 @@ import { AlertTriangle, Download, FileJson, Hand, MousePointer2, Pencil, Plus, S
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Group, Image as KonvaImage, Layer, Rect, Stage, Text, Transformer } from "react-konva";
 import type Konva from "konva";
-import { createProject, exportProject, fileUrl, getProject, importFile, listProjects, saveProject } from "./api";
+import { createProject, exportProject, fileUrl, getProject, importNewDataset, listProjects, saveProject } from "./api";
 import { annotationToRect, clampRectToImage, labelMeShapesToAnnotations, rectToPoints, validateAnnotations } from "./geometry";
 import type { Annotation, AnnotationType, ExportResult, Project, ProjectPage, ProjectSummary } from "./types";
 import { useImageElement } from "./useImageElement";
@@ -49,9 +49,9 @@ export default function App() {
     try {
       const summaries = await listProjects();
       if (summaries.length === 0) {
-        const created = await createProject("GD&T PaddleOCR Dataset");
-        setProjects([{ id: created.id, name: created.name, updatedAt: created.updatedAt, pageCount: 0 }]);
-        setProject(created);
+        setProjects([]);
+        setProject(null);
+        setActivePageId(null);
       } else {
         setProjects(summaries);
         const loaded = await getProject(summaries[0].id);
@@ -81,10 +81,11 @@ export default function App() {
     if (!name) return;
     setBusy(true);
     try {
-      const created = await createProject(name);
+      const { project: created, exportResult: result } = await createProject(name);
+      setExportResult(result ?? null);
       await reloadProjects(created.id);
       setDirty(false);
-      setMessage("Project created.");
+      setMessage("Dataset created.");
     } catch (error) {
       setMessage(readError(error));
     } finally {
@@ -113,11 +114,12 @@ export default function App() {
     if (!project) return;
     setBusy(true);
     try {
-      const saved = await saveProject(project);
+      const { project: saved, exportResult: result } = await saveProject(project, valRatio);
       setProject(saved);
+      setExportResult(result);
       setDirty(false);
-      setMessage("Saved.");
-      await reloadProjects();
+      setMessage("Saved and export overwritten.");
+      await reloadProjects(saved.id);
     } catch (error) {
       setMessage(readError(error));
     } finally {
@@ -126,20 +128,21 @@ export default function App() {
   }
 
   async function handleImport(file: File | undefined) {
-    if (!project || !file) return;
+    if (!file) return;
     setBusy(true);
-    setMessage(`Importing ${file.name}...`);
+    setMessage(`Importing ${file.name} as a new dataset...`);
     try {
-      if (dirty) {
-        await saveProject(project);
+      if (dirty && project) {
+        await saveProject(project, valRatio);
         setDirty(false);
       }
-      const updated = await importFile(project.id, file, dpi);
+      const { project: updated, exportResult: result } = await importNewDataset(file, dpi);
       setProject(updated);
       setActivePageId(updated.pages[updated.pages.length - 1]?.id ?? null);
       setSelectedAnnotationId(null);
-      setMessage("Import completed.");
-      await reloadProjects();
+      setExportResult(result);
+      setMessage("Import completed. New dataset export created.");
+      await reloadProjects(updated.id);
     } catch (error) {
       setMessage(readError(error));
     } finally {
@@ -174,8 +177,9 @@ export default function App() {
     setBusy(true);
     try {
       if (dirty) {
-        const saved = await saveProject(project);
+        const { project: saved, exportResult: saveResult } = await saveProject(project, valRatio);
         setProject(saved);
+        setExportResult(saveResult);
         setDirty(false);
       }
       const result = await exportProject(project.id, valRatio);
@@ -261,11 +265,11 @@ export default function App() {
 
         <button className="primary-action" onClick={handleCreateProject} disabled={busy}>
           <Plus size={16} />
-          New project
+          New empty dataset
         </button>
 
         <section className="stack">
-          <h2>Projects</h2>
+          <h2>Datasets</h2>
           <div className="project-list">
             {projects.map((summary) => (
               <button
@@ -336,9 +340,9 @@ export default function App() {
               accept=".pdf,.png,.jpg,.jpeg"
               onChange={(event) => void handleImport(event.target.files?.[0])}
             />
-            <button className="text-button" onClick={() => fileInputRef.current?.click()} disabled={!project || busy}>
+            <button className="text-button" onClick={() => fileInputRef.current?.click()} disabled={busy}>
               <Upload size={16} />
-              Import
+              Import new
             </button>
           </div>
 

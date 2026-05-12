@@ -33,6 +33,7 @@ export type ProjectSummary = {
   name: string;
   updatedAt: string;
   pageCount: number;
+  exportDir?: string | null;
 };
 
 export type ExportResult = {

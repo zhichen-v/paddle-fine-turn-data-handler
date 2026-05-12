@@ -7,13 +7,13 @@ export async function listProjects(): Promise<ProjectSummary[]> {
   return readJson(response).then((data) => data.projects);
 }
 
-export async function createProject(name: string): Promise<Project> {
+export async function createProject(name: string): Promise<{ project: Project; exportResult?: ExportResult }> {
   const response = await fetch("/api/projects", {
     method: "POST",
     headers: jsonHeaders,
     body: JSON.stringify({ name })
   });
-  return readJson(response).then((data) => data.project);
+  return readJson(response);
 }
 
 export async function getProject(id: string): Promise<Project> {
@@ -21,16 +21,27 @@ export async function getProject(id: string): Promise<Project> {
   return readJson(response).then((data) => data.project);
 }
 
-export async function saveProject(project: Project): Promise<Project> {
+export async function saveProject(project: Project, valRatio: number): Promise<{ project: Project; exportResult: ExportResult }> {
   const response = await fetch(`/api/projects/${project.id}`, {
     method: "PUT",
     headers: jsonHeaders,
-    body: JSON.stringify({ project })
+    body: JSON.stringify({ project, valRatio })
   });
-  return readJson(response).then((data) => data.project);
+  return readJson(response);
 }
 
-export async function importFile(projectId: string, file: File, dpi: number): Promise<Project> {
+export async function importNewDataset(file: File, dpi: number): Promise<{ project: Project; exportResult: ExportResult }> {
+  const form = new FormData();
+  form.append("file", file);
+  form.append("dpi", String(dpi));
+  const response = await fetch("/api/import", {
+    method: "POST",
+    body: form
+  });
+  return readJson(response);
+}
+
+export async function importFile(projectId: string, file: File, dpi: number): Promise<{ project: Project; exportResult: ExportResult }> {
   const form = new FormData();
   form.append("file", file);
   form.append("dpi", String(dpi));
@@ -38,7 +49,7 @@ export async function importFile(projectId: string, file: File, dpi: number): Pr
     method: "POST",
     body: form
   });
-  return readJson(response).then((data) => data.project);
+  return readJson(response);
 }
 
 export async function exportProject(projectId: string, valRatio: number): Promise<ExportResult> {

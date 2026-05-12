@@ -2,7 +2,7 @@
 
 [中文說明](README_zh.md)
 
-Local annotation tool for building PaddleOCR text-detection fine-tune datasets from engineering drawings. The tool does not run OCR. It is designed to speed up manual box annotation, transcription entry, project persistence, and PaddleOCR detection-label export.
+Local annotation tool for building PaddleOCR text-detection fine-tune datasets from engineering drawings. The tool does not run OCR. It is designed to speed up manual box annotation, transcription entry, export-backed persistence, and PaddleOCR detection-label export.
 
 ## Use Case
 
@@ -26,8 +26,8 @@ images/page_001.png	[{"transcription":"200±0.05","points":[[100,50],[180,50],[1
 - Frontend: Vite, React, TypeScript, Konva / React-Konva
 - Backend: Node.js, Express
 - PDF rasterization: Python worker executed through `uv`, using `PyMuPDF`
-- Data storage: local JSON files under `data/projects`
-- Dataset export: local files under `data/exports`
+- Editing cache: local JSON files under `data/projects`
+- Dataset source of truth: local folders under `data/exports`
 
 ## Requirements
 
@@ -73,14 +73,14 @@ The build runs TypeScript checking and Vite production bundling.
 
 ## Basic Workflow
 
-1. Create or select a project.
-2. Import a PDF, PNG, JPG, or JPEG.
+1. Import a PDF, PNG, JPG, or JPEG. Each import creates a new dataset.
+2. Or select an existing dataset from the left panel. Datasets are loaded from `data/exports/*/project.json`.
 3. For PDFs, choose a DPI before import. The backend converts each page to PNG.
 4. Draw boxes around dimension / GD&T / datum regions.
 5. Enter the transcription manually.
 6. Use `###` ignore boxes for regions that should be skipped by PaddleOCR training.
-7. Save the project.
-8. Export the PaddleOCR dataset.
+7. Click Save. Save overwrites the same dataset folder under `data/exports/<dataset_id>/`.
+8. Click Export only when you want to manually rebuild the same export folder.
 
 ## UI Controls
 
@@ -89,7 +89,8 @@ The build runs TypeScript checking and Vite production bundling.
 - Pan tool: move around the canvas.
 - Mouse wheel: zoom around the pointer position.
 - Symbol buttons: append common GD&T / dimension symbols to the selected transcription.
-- Import LabelMe JSON: import old annotation output for the active page.
+- Import new: import a new PDF/image as a new dataset.
+- Import LabelMe JSON: import old annotation output into the active page.
 
 ## LabelMe JSON Import
 
@@ -109,30 +110,34 @@ data/
 │       ├── project.json
 │       └── pages/
 ├── exports/
-│   └── <project_id>_<timestamp>/
+│   └── <dataset_id>/
 │       ├── images/
 │       ├── train.txt
 │       ├── val.txt
+│       ├── project.json
 │       └── manifest.json
 └── uploads/
 ```
 
-`data/projects`, `data/exports`, and `data/uploads` are ignored by git.
+`data/projects`, `data/exports`, and `data/uploads` are ignored by git. `data/projects` is an internal editing cache. `data/exports/<dataset_id>/project.json` is what the UI uses to reload processed datasets.
 
 ## Export Output
 
-Exports are written under:
+Exports are written under a stable dataset folder:
 
 ```txt
-data/exports/<project_id>_<timestamp>/
+data/exports/<dataset_id>/
 ```
 
-Each export contains:
+Save and Export both overwrite the same folder for the current dataset. A new folder is created only when you import a new image/PDF as a new dataset.
+
+Each dataset export contains:
 
 ```txt
 images/
 train.txt
 val.txt
+project.json
 manifest.json
 ```
 
@@ -185,7 +190,8 @@ Implemented:
 - Image import
 - PDF-to-PNG import
 - LabelMe-like JSON import
-- PaddleOCR detection export
+- Stable overwrite PaddleOCR detection export
+- Reloading processed datasets from `data/exports`
 
 Not implemented yet:
 

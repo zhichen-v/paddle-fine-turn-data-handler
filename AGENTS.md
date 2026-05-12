@@ -4,7 +4,7 @@ This file is for future coding agents working on this repository.
 
 ## Project Purpose
 
-Build and maintain a local annotation app for creating PaddleOCR text-detection fine-tune datasets from engineering drawings. The app is intentionally not an OCR engine. It is a data preparation tool for manual box annotation and transcription.
+Build and maintain a local annotation app for creating PaddleOCR text-detection fine-tune datasets from engineering drawings. The app is intentionally not an OCR engine. It is a data preparation tool for manual box annotation and transcription. Current persistence is export-backed: processed datasets are reloaded from `data/exports/<dataset_id>/project.json`.
 
 Primary output:
 
@@ -77,14 +77,20 @@ server/
 scripts/
   pdf_to_images.py     PDF rasterization worker
 data/
-  projects/            Local project JSON and page images, gitignored
-  exports/             PaddleOCR dataset exports, gitignored
+  projects/            Internal editing cache, gitignored
+  exports/             Stable dataset folders and PaddleOCR exports, gitignored
   uploads/             Temporary uploads, gitignored
 ```
 
 ## Data Model
 
-Project files live at:
+The UI primarily loads dataset project files from:
+
+```txt
+data/exports/<dataset_id>/project.json
+```
+
+The editing cache lives at:
 
 ```txt
 data/projects/<project_id>/project.json
@@ -125,6 +131,7 @@ Implemented endpoints:
 - `POST /api/projects`
 - `GET /api/projects/:id`
 - `PUT /api/projects/:id`
+- `POST /api/import`
 - `POST /api/projects/:id/import`
 - `POST /api/projects/:id/export`
 
@@ -162,10 +169,10 @@ Avoid broad format changes here unless you add tests or a clear compatibility pa
 
 ## Export Rules
 
-Exports live under:
+Stable exports live under:
 
 ```txt
-data/exports/<project_id>_<timestamp>/
+data/exports/<dataset_id>/
 ```
 
 Files:
@@ -174,11 +181,15 @@ Files:
 images/
 train.txt
 val.txt
+project.json
 manifest.json
 ```
 
 Rules:
 
+- Save overwrites the current dataset export folder through `PUT /api/projects/:id`.
+- Explicit Export also overwrites the same folder through `POST /api/projects/:id/export`.
+- Importing a new PDF/image through `POST /api/import` creates a new dataset id and export folder.
 - Copy page images into `images/`.
 - Write one label line per page.
 - Use tab between image path and JSON.
@@ -191,9 +202,10 @@ Rules:
 - Preserve existing project JSON compatibility where possible.
 - Use `uv` for Python dependencies. Do not ask users to install Python packages globally.
 - Do not commit generated user data under `data/projects`, `data/exports`, or `data/uploads`.
+- Keep `data/exports/<dataset_id>/project.json` compatible; this file is now the reload path for processed datasets.
 - Keep annotation coordinates in original image space, not canvas/screen space.
 - If changing canvas zoom/pan behavior, verify manual box creation and dragging still write image-space coordinates.
-- If changing export behavior, inspect the generated `train.txt` manually.
+- If changing export behavior, inspect the generated `train.txt` manually and verify the export folder is overwritten instead of timestamped.
 
 ## Verification Checklist
 
@@ -216,5 +228,5 @@ For UI changes, start the app and verify:
 - Import button is visible
 - Drawing a box creates one annotation
 - Editing transcription updates the selected box
-- Save disables after successful save
-- Export produces `train.txt`
+- Save disables after successful save and overwrites `data/exports/<dataset_id>/`
+- Export produces `train.txt` without creating a timestamped folder
